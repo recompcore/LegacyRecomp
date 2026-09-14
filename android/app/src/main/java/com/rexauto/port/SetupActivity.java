@@ -184,8 +184,10 @@ public class SetupActivity extends Activity {
         String prev = tail(new File(logsDir(), "crash.prev.txt"), 4000);
         String cur = tail(crashFile(), 4000);
         String log = tail(gameLog(), 6000);
+        String prof = tail(new File(logsDir(), "profile.txt"), 5000);
         String text = (cur.isEmpty() ? prev : cur);
         if (!text.isEmpty()) text = "--- last crash ---\n" + text + "\n";
+        if (!prof.isEmpty()) text += "--- profile (where CPU time goes) ---\n" + prof + "\n";
         text += "--- " + BuildConfig.PROJECT + ".log (tail) ---\n" + (log.isEmpty() ? "(no log yet)" : log);
         final String all = text;
         TextView tv = new TextView(this);

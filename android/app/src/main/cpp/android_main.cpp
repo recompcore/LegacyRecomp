@@ -24,6 +24,16 @@
 #include <ucontext.h>
 #include <unistd.h>
 #include <unwind.h>
+#include <sys/syscall.h>
+#include <pthread.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <map>
+#include <sstream>
+#include <thread>
+#include <unordered_map>
 #include <sys/resource.h>
 #include <jni.h>
 
@@ -256,6 +266,198 @@ void InstallCrashReporter(const std::string& log_dir) {
   });
 }
 
+// --- built-in sampling profiler ---------------------------------------------
+// Every 5 ms each thread of the process gets SIGPROF; the handler records its
+// pc into a lock-free open-addressing table. Every 20 s a report is written to
+// <logs>/profile.txt: per-thread CPU%, per-core clock (throttling), and the
+// top sampled host functions resolved through dladdr (sub_XXXXXXXX = guest
+// function, librexruntime/librexgpu = runtime). Costs well under 1% CPU.
+// Disabled with settings.txt `env.REX_PROFILE=0`.
+namespace prof {
+constexpr size_t kSlots = 1 << 16;  // power of two
+struct Slot { std::atomic<uintptr_t> pc; std::atomic<uint32_t> n; };
+Slot g_table[kSlots];
+std::atomic<uint64_t> g_total{0}, g_dropped{0};
+std::string g_path;
+
+void OnSigprof(int, siginfo_t*, void* uctx) {
+  auto* uc = static_cast<ucontext_t*>(uctx);
+  uintptr_t pc = uc ? static_cast<uintptr_t>(uc->uc_mcontext.pc) : 0;
+  if (!pc) return;
+  g_total.fetch_add(1, std::memory_order_relaxed);
+  size_t h = (pc >> 2) * 0x9E3779B97F4A7C15ull >> 48;
+  for (int probe = 0; probe < 32; ++probe) {
+    Slot& sl = g_table[(h + probe) & (kSlots - 1)];
+    uintptr_t cur = sl.pc.load(std::memory_order_relaxed);
+    if (cur == pc) { sl.n.fetch_add(1, std::memory_order_relaxed); return; }
+    if (cur == 0) {
+      uintptr_t expect = 0;
+      if (sl.pc.compare_exchange_strong(expect, pc, std::memory_order_relaxed)) {
+        sl.n.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+      if (expect == pc) { sl.n.fetch_add(1, std::memory_order_relaxed); return; }
+    }
+  }
+  g_dropped.fetch_add(1, std::memory_order_relaxed);
+}
+
+struct ThreadCpu { std::string name; uint64_t ticks; };
+
+std::map<int, ThreadCpu> SampleThreads() {
+  std::map<int, ThreadCpu> out;
+  std::error_code ec;
+  for (auto& e : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+    int tid = std::atoi(e.path().filename().c_str());
+    if (tid <= 0) continue;
+    std::ifstream st(e.path() / "stat");
+    std::string line;
+    if (!std::getline(st, line)) continue;
+    auto rp = line.rfind(')');
+    auto lp = line.find('(');
+    if (rp == std::string::npos || lp == std::string::npos) continue;
+    std::string name = line.substr(lp + 1, rp - lp - 1);
+    // fields after ')': state(3) ... utime(14) stime(15)
+    std::istringstream rest(line.substr(rp + 2));
+    std::string tok; uint64_t ut = 0, stm = 0;
+    for (int i = 3; i <= 15 && rest >> tok; ++i) {
+      if (i == 14) ut = std::strtoull(tok.c_str(), nullptr, 10);
+      if (i == 15) stm = std::strtoull(tok.c_str(), nullptr, 10);
+    }
+    out[tid] = {name, ut + stm};
+  }
+  return out;
+}
+
+std::string CpuFreqs() {
+  std::string s;
+  for (int c = 0; c < 16; ++c) {
+    std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(c) + "/cpufreq/scaling_cur_freq");
+    long khz = 0;
+    if (!(f >> khz)) break;
+    if (!s.empty()) s += " ";
+    s += std::to_string(khz / 1000);
+  }
+  return s.empty() ? "n/a" : s + " MHz";
+}
+
+void Dump(const std::map<int, ThreadCpu>& prev, const std::map<int, ThreadCpu>& cur,
+          double interval_s, uint64_t total_before) {
+  std::ofstream out(g_path, std::ios::trunc);
+  if (!out) return;
+  const long hz = sysconf(_SC_CLK_TCK);
+  out << REX_APP_NAME << " profile (last " << int(interval_s) << " s window; rewritten every 20 s)\n";
+  out << "cpu clocks: " << CpuFreqs() << "\n";
+  out << "samples: " << (g_total.load() - total_before) << " in window, dropped " << g_dropped.load() << "\n\n";
+
+  out << "threads (CPU% of one core):\n";
+  std::vector<std::pair<double, std::string>> th;
+  for (auto& [tid, c] : cur) {
+    auto it = prev.find(tid);
+    uint64_t d = it == prev.end() ? c.ticks : c.ticks - it->second.ticks;
+    double pct = hz > 0 && interval_s > 0 ? 100.0 * double(d) / double(hz) / interval_s : 0;
+    if (pct >= 0.5) th.push_back({pct, c.name});
+  }
+  std::sort(th.rbegin(), th.rend());
+  for (auto& [pct, name] : th) out << fmt::format("  {:6.1f}%  {}\n", pct, name);
+
+  // Aggregate samples by symbol (or module+page when unsymbolised).
+  std::unordered_map<std::string, uint64_t> by_sym;
+  std::unordered_map<std::string, uint64_t> by_mod;
+  uint64_t seen = 0;
+  for (size_t i = 0; i < kSlots; ++i) {
+    uintptr_t pc = g_table[i].pc.load(std::memory_order_relaxed);
+    uint32_t n = g_table[i].n.exchange(0, std::memory_order_relaxed);
+    if (!pc || !n) continue;
+    seen += n;
+    Dl_info di{};
+    std::string mod = "?", sym;
+    if (dladdr(reinterpret_cast<void*>(pc), &di)) {
+      if (di.dli_fname) { mod = di.dli_fname; auto sl = mod.find_last_of('/'); if (sl != std::string::npos) mod = mod.substr(sl + 1); }
+      if (di.dli_sname) sym = di.dli_sname;
+      else sym = fmt::format("{}+0x{:x}", mod, (pc - reinterpret_cast<uintptr_t>(di.dli_fbase)) & ~uintptr_t(0xfff));
+    } else {
+      sym = fmt::format("0x{:x}", pc);
+    }
+    by_sym[sym] += n;
+    by_mod[mod] += n;
+  }
+  out << "\nby module:\n";
+  std::vector<std::pair<uint64_t, std::string>> mods(by_mod.size());
+  std::transform(by_mod.begin(), by_mod.end(), mods.begin(), [](auto& kv) { return std::make_pair(kv.second, kv.first); });
+  std::sort(mods.rbegin(), mods.rend());
+  for (auto& [n, m] : mods) out << fmt::format("  {:5.1f}%  {}\n", seen ? 100.0 * n / seen : 0.0, m);
+
+  out << "\ntop functions (sub_XXXXXXXX = game code; __imp__ prefix is the same function):\n";
+  std::vector<std::pair<uint64_t, std::string>> syms(by_sym.size());
+  std::transform(by_sym.begin(), by_sym.end(), syms.begin(), [](auto& kv) { return std::make_pair(kv.second, kv.first); });
+  std::sort(syms.rbegin(), syms.rend());
+  size_t k = 0;
+  for (auto& [n, sname] : syms) {
+    if (++k > 60) break;
+    out << fmt::format("  {:5.1f}%  {}\n", seen ? 100.0 * n / seen : 0.0, sname);
+  }
+}
+
+void Start(const std::string& log_dir) {
+  if (const char* e = std::getenv("REX_PROFILE"); e && e[0] == '0') return;
+  g_path = log_dir + "/profile.txt";
+  struct sigaction sa{};
+  sa.sa_sigaction = OnSigprof;
+  sa.sa_flags = SA_SIGINFO | SA_RESTART;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGPROF, &sa, nullptr);
+  std::thread([] {
+    pthread_setname_np(pthread_self(), "rex-profiler");
+    const pid_t pid = getpid();
+    const pid_t self = gettid();
+    auto prev = SampleThreads();
+    auto t_prev = std::chrono::steady_clock::now();
+    uint64_t total_before = 0;
+    int ticks = 0;
+    std::vector<int> tids;
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      if ((ticks++ % 200) == 0) {  // refresh the thread list once a second
+        tids.clear();
+        std::error_code ec;
+        for (auto& e : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+          int tid = std::atoi(e.path().filename().c_str());
+          if (tid > 0 && tid != self) tids.push_back(tid);
+        }
+      }
+      for (int tid : tids) {
+        // Only threads that are actually running burn CPU; skip sleepers so the
+        // profile is "where CPU time goes", not "where threads wait".
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        char buf[256];
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = 0;
+        const char* rp = std::strrchr(buf, ')');
+        if (!rp || rp[1] != ' ') continue;
+        if (rp[2] != 'R') continue;
+        syscall(SYS_tgkill, pid, tid, SIGPROF);
+      }
+      if (ticks % 4000 == 0) {  // 20 s
+        auto cur = SampleThreads();
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - t_prev).count();
+        Dump(prev, cur, dt, total_before);
+        prev = std::move(cur);
+        t_prev = now;
+        total_before = g_total.load();
+      }
+    }
+  }).detach();
+  ALOGI("profiler on: %s", g_path.c_str());
+}
+}  // namespace prof
+
 std::string ResolveLogDir(const std::string& external_dir) {
   const std::string dir = external_dir + "/logs";
   std::error_code ec;
@@ -324,6 +526,7 @@ int RunAndroidApp() {
   // user has seen it (or chose to play again) -- start clean.
   std::filesystem::remove(log_dir + "/crash.txt", ec);
   InstallCrashReporter(log_dir);
+  prof::Start(log_dir);
 
   rex::SetAndroidApplicationContext(java_vm, SDL_GetAndroidActivity(), lib_dir.c_str());
   rex::thread::AndroidInitialize();
