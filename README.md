@@ -2,6 +2,10 @@
 
 **Minecraft: Xbox 360 Edition — Native Recompilation Project**
 
+<p align="center">
+  <img src="gui/minecraftxbox360.jpg" alt="Minecraft: Xbox 360 Edition" width="700">
+</p>
+
 LegacyRecomp is an independent reverse-engineering and recompilation project focused on **Minecraft: Xbox 360 Edition**.
 
 The goal of LegacyRecomp is to recompile the original Xbox 360 executable into native code for modern platforms while preserving the original game's behavior and functionality.
