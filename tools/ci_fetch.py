@@ -63,7 +63,7 @@ def download(url, dest_dir):
         log("Google Drive link -> gdown (id=%s)" % gid)
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "gdown"])
         import gdown  # noqa: E402
-        out = gdown.download(id=gid, output=os.path.join(dest_dir, ""), quiet=False, fuzzy=True)
+        out = gdown.download(id=gid, output=os.path.join(dest_dir, ""), quiet=False)
         if not out or not os.path.isfile(out):
             raise SystemExit("gdown could not fetch the file -- is the link shared as "
                              "'Anyone with the link'?")
