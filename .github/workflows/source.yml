@@ -1,0 +1,27 @@
+name: Import LegacyRecomp
+
+on:
+  workflow_dispatch:
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract into empty LegacyRecomp folder
+        run: |
+          mkdir -p ports/LegacyRecomp
+          unzip -o source-LegacyRecomp.zip -d ports/LegacyRecomp
+
+      - name: Commit everything
+        run: |
+          git add ports/LegacyRecomp
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Import LegacyRecomp source"
+          git push
