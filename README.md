@@ -1,226 +1,271 @@
-# rexauto
+# LegacyRecomp
 
-**Turn an Xbox 360 game into a native PC executable — automatically.**
+**Minecraft: Xbox 360 Edition — Native Recompilation Project**
 
-[![latest release](https://img.shields.io/github/v/release/xdzleo/rexauto?label=download)](https://github.com/xdzleo/rexauto/releases/latest)
-[![license](https://img.shields.io/github/license/xdzleo/rexauto)](LICENSE)
-![platform](https://img.shields.io/badge/platform-Windows-blue)
-![python](https://img.shields.io/badge/python-3.10%2B-blue)
+LegacyRecomp is an independent reverse-engineering and recompilation project focused on **Minecraft: Xbox 360 Edition**.
 
-rexauto is a desktop front-end and orchestrator for the
-[ReXGlue](https://github.com/xdzleo/rexglue-skate3) static recompiler. Point it at a game
-container — ISO, GoD, STFS or an extracted folder — and it runs the entire pipeline that is
-otherwise a day of by-hand work: extract, scaffold, recover jump tables, build, and the two
-self-heal loops a fresh title needs. Then it launches the result.
+The goal of LegacyRecomp is to recompile the original Xbox 360 executable into native code for modern platforms while preserving the original game's behavior and functionality.
 
-<p align="center"><img src="gui/rexauto_icon.png" width="96"></p>
+## About
 
-## This is not emulation
+Minecraft: Xbox 360 Edition is part of the Legacy Console Edition family of Minecraft releases.
 
-An emulator reads guest PowerPC instructions and interprets or JITs them **every time you
-run the game**. Static recompilation translates the Xbox 360 binary into C++ **once**, then
-compiles it into a real x86-64 executable. Your CPU runs the game's machine code directly —
-no interpreter, no per-instruction overhead, no emulator in the loop.
+LegacyRecomp focuses on the original Xbox 360 version and its executable, using reverse engineering and static recompilation techniques to transform the original code into a native application.
 
-The output is a `.exe`. It shows up in Task Manager as your game.
+This project is not a recreation of Minecraft from scratch. Instead, the objective is to preserve the original game's code and behavior through recompilation and compatibility layers.
 
-## Titles taken through the pipeline
+## Recompilation
 
-Status is per title and honest — recompilation getting a build to boot is a different problem
-from the runtime implementing every GPU and kernel path a given game uses.
+The general concept behind LegacyRecomp is:
 
-| Title | Status |
-|---|---|
-| Skate 3 | playable |
-| GTA: San Andreas HD | gameplay |
-| GTA V | reaches gameplay |
-| Dragon Ball Z: Budokai 3 HD | battle running |
-| Captain America: Super Soldier | gameplay |
-| WWE SmackDown vs. Raw 2007 | playable to menu |
-| Gears of War: Judgment | boots, converges |
-| Crash of the Titans | boots |
+    Xbox 360 Executable
+            |
+            v
+       Binary Analysis
+            |
+            v
+     PowerPC Code
+            |
+            v
+    Static Recompilation
+            |
+            v
+      Native Code
+            |
+            v
+     Native Platform
 
-A wider fleet (~30 titles) is used as a regression gate: every SDK change has to keep the
-whole set byte-identical or better before it ships.
+The original Xbox 360 executable contains PowerPC code designed for the Xenon processor.
 
-## Download & run
+LegacyRecomp analyzes this code and converts it into native code that can run outside of the original Xbox 360 environment.
 
-1. Grab `rexauto.exe` from the [latest release](https://github.com/xdzleo/rexauto/releases/latest).
-2. Run it. A native window opens (Edge WebView2): a 3D scene, the game's cover art and title
-   read straight from the package, a live six-stage tracker, and a streaming log.
-3. First run, the app installs the **ReXGlue SDK** by itself — the exact build this release
-   was tested with, laid out next to the app (a `rexglue/` left by an older release is replaced
-   the same way). Open **Setup** (top-right) for the rest:
-   - **LLVM/clang** + **VS Build Tools** — via `winget`.
-   - **IDA Pro** — optional, commercial; only the jump-table stage uses it.
-4. Point it at a container, hit **Recompile**, watch it go.
+## Goals
 
-> rexauto *drives* a C++ compiler — it isn't one. A real recompiler has to build the C++ it
-> generates (tens of thousands of functions), so a clang + Windows SDK toolchain is required;
-> there's no 15 MB "zero-dependency" recompiler. What rexauto does is make installing all of
-> it one button instead of a scavenger hunt.
+- Recompile Minecraft: Xbox 360 Edition.
+- Preserve the original gameplay and mechanics.
+- Preserve the original game logic.
+- Recreate required Xbox 360 functionality.
+- Provide native platform support.
+- Maintain compatibility with the original game's data where possible.
+- Keep the project organized and maintainable.
+- Document research and discoveries related to the original executable.
 
-## The pipeline
+## Xbox 360
 
-1. **extract** — container → `default.xex` + assets: **STFS** (`CON`/`LIVE`/`PIRS` — XBLA/DLC),
-   **ISO** (GDFX/XDVDFS disc), **GoD** (SVOD single-file), or an already-extracted folder.
-2. **init** — `rexglue init` scaffolds the project.
-3. **setjmp** — finds the statically-linked CRT `setjmp`/`longjmp` and records them in the
-   manifest. A guest `longjmp` restores registers + stack from a `jmp_buf` and `blr`s;
-   recompiled naïvely that `blr` becomes a plain `return`, corrupting a non-volatile register
-   and crashing exception-using titles at startup. Titles without exceptions have no signature
-   and are left untouched.
-4. **jumptables** — with IDA present, recovers `bctr` jump tables into `switch_tables.toml`
-   ([xenon-jumptables](https://github.com/xdzleo/xenon-jumptables)). Skipped cleanly otherwise
-   — the recompiler's built-in switch handling still applies.
-5. **build** — codegen + clang/CMake. When the recompiler splits a function mid-flow (a branch
-   into the next one → a `goto` to an undeclared label), rexauto **auto-extends** the boundary
-   and rebuilds — the fix porting teams otherwise make by hand — until it's clean.
-6. **runheal** — runs the game; every `invalid or unregistered function at 0xADDR` the
-   dispatcher hits gets registered, rebuilt, and re-run, until none are left.
-7. **run** — launches it.
+Minecraft: Xbox 360 Edition was designed specifically for the Xbox 360 hardware and software environment.
 
-## Shared cures (the gabarito database)
+The original game therefore relies on functionality provided by the Xbox 360 platform.
 
-The slow part of a fresh port is the heal loops re-discovering the functions the static pass
-missed — and that set is **identical for everyone running the same binary**. So rexauto
-publishes it: once a title converges, its cures (a `functions.toml` keyed by the `default.xex`
-SHA-256) go into a shared database, and the next person to recompile that exact binary seeds
-them up front and skips most of the heal. Fetch is public and keyless; a miss just heals from
-scratch.
+LegacyRecomp may need to recreate or replace functionality related to:
 
-The bundled SDK is **pinned by hash** — rexauto refuses to run against an SDK build it wasn't
-tested with, so a mismatched runtime can't silently produce a broken exe. There is no override.
-The SDK itself is reproducible: branch
-[`rexauto`](https://github.com/xdzleo/rexglue-sdk/tree/rexauto) of our fork is upstream `main`
-plus every fix we carry, each one also an open upstream PR; its tree is byte-identical to the
-source the bundled binaries were built from.
+- Xenon PowerPC execution
+- Memory management
+- Threads
+- Synchronization
+- File I/O
+- Graphics
+- Audio
+- Controller input
+- Networking
+- Timers
+- System services
+- Xbox 360-specific libraries
 
-## CLI
+The purpose of these compatibility layers is to provide the functionality expected by the original game while running on a modern platform.
 
-Same engine, no window:
+## Native Platform
 
-```sh
-python rexauto.py "<container-or-folder>" --name mygame --run
-```
+After recompilation, the resulting code can be adapted to the target platform through native platform implementations.
 
-Stages are checkpointed (re-running skips finished ones). Flags: `--from <stage>`,
-`--only <stage>`, `--no-jumptables`. Tool paths come from the usual install locations, `PATH`,
-or env vars (`REXGLUE`, `REXSDK_DIR`, `IDAT`, `CLANG`, `VCVARS`, `PYTHON`, `JT_REPO`).
+This allows platform-specific functionality to be separated from the recompiled game code.
 
-## One click from a phone (GitHub Actions)
+For example:
 
-No PC handy? The repo ships a workflow that does the whole pipeline on a hosted Windows runner:
+    Recompiled Game Code
+            |
+            v
+    Compatibility Layer
+            |
+            v
+    Platform Abstraction
+            |
+            v
+    Native Platform APIs
 
-1. Upload `default.xex` (or the ISO / GoD / STFS / a `.zip` with one) anywhere that gives a
-   link — Google Drive, Dropbox, or any direct URL.
-2. **Actions → Recompile game → Run workflow**, paste the link, pick a project name, press
-   the green button.
-3. When it finishes, the `port-<name>` artifact holds **`<Title> Launcher.exe`** (pick your
-   ISO / XBLA-STFS / GoD / default.xex -> unpacked into `assets\`, Graphics & performance
-   presets, Play -- the desktop twin of the Android launcher), `<name>.exe`, the runtime DLLs
-   and `play <name>.cmd`; `logs-<name>` has every log; `gabarito-<name>` has the cures the heal
-   loop found (drop them into `gabaritos/` to skip the heal next time); `source-<name>` is
-   the full recompiled project (generated C++, `src/`, `*.toml`, CMake files) for rebuilding
-   or patching the port on a PC.
+This structure allows the game logic to remain as close as possible to the original executable while platform-specific functionality is implemented separately.
 
-The runner installs the pinned ReXGlue SDK by itself (cached across runs) and uses the
-clang / VS Build Tools already on `windows-latest`. IDA isn't available there, so the
-jumptables stage is skipped; the run-heal loop is on by default (`runheal` input) and can
-be turned off for a quick build-only pass. Unzip the artifact next to the game folder on a
-PC (or phone via Winlator), copy the game files into its `assets/` folder and run
-`play <name>.cmd` or the exe. The port is **portable**: the game is looked up in
-`assets/`, `game/`, `data/` next to the exe and saves go to `userdata/` next to it —
-no absolute paths from the build machine are baked in.
+## Graphics
 
-### Android APK (native arm64, no Winlator)
+The original Xbox 360 version uses the graphics hardware and APIs available on the Xbox 360.
 
-**Actions → Recompile for Android → Run workflow**, same link, same name. Two jobs run:
-the Windows one does codegen + every static heal exactly like above, then an Ubuntu job
-takes the generated C++ and builds it with the ReXGlue SDK v0.10.0 plus the Android patch
-set from [hells-gate-recomp-android](https://github.com/deivid22srk/hells-gate-recomp-android)
-(NDK r27, Vulkan-only, `libmain.so` + `librexgpu-xenos.so`). The `<name>-android-apk`
-artifact is a signed, installable APK; `source-<name>` holds the complete Android Studio
-project (launcher app + recompiled port sources) and `port-src-<name>` the bare port:
+A native implementation therefore requires a graphics layer capable of providing the functionality expected by the recompiled game.
 
-* the launcher shows **"<Game title> — Android Edition"** (title and Title ID are read from
-  the xex; the name comes from a bundled 3 000-title Xbox 360 database);
-* **Choose ISO / XBLA package / default.xex** — pick the game on the phone; the app unpacks
-  it itself into its private storage: ISO (GDFX), **STFS** packages (CON/LIVE/PIRS — XBLA
-  and arcade titles), single-file **Games on Demand**, a bare `default.xex`. **Choose
-  folder** takes an already-extracted game or a multi-part GoD dump
-  (`<id>/<header>` + `<header>.data/Data0000…`). A dump of a **different title is
-  refused** by Title ID;
-* **Graphics & performance** — a **Performance / Balanced / Accuracy** preset (Performance
-  is the default: no memexport readback, occlusion queries short-circuited, anisotropic
-  off, FIFO present, capped texture cache, warnings-only log), a **30/60 FPS cap** (implemented
-  as a guest vblank-rate cap, so it also halves GPU work), resolution scale, guest video
-  mode down to 960x540, vsync, letterbox, screen orientation, "tolerant mode"; the native
-  build uses -O3 + ThinLTO, ARMv8.2-A (+fp16/dotprod; `baseline_arm` input for 2016-era
-  SoCs), sustained-performance mode and a raised process priority;
-* **GPU driver** — on Snapdragon phones, import a Turnip / newer Adreno driver zip (the
-  same packs Yuzu, Skyline, Dolphin and Winlator use: `meta.json` + `libvulkan_*.so`); it is
-  loaded through [libadrenotools](https://github.com/bylaws/libadrenotools) instead of
-  the system Vulkan driver. Long-press a driver to remove it;
-* an on-screen gamepad (movable / resizable, haptics) and Bluetooth controllers via SDL.
+This may include:
 
-Every APK of the same project is signed with the same CI key, so a new run installs over
-the previous one and keeps saves. `android/` is a normal Gradle project too:
-`tools/android_sdk.sh` then `cd android && ./gradlew assembleRelease -PrexName=<name> ...`.
+- Textures
+- Vertex buffers
+- Index buffers
+- Render targets
+- Depth buffers
+- Shaders
+- Rendering states
+- GPU synchronization
+- Presentation
+- Resolution handling
 
-## What it does NOT do
+The objective is to reproduce the behavior of the original rendering system while using APIs available on the target platform.
 
-rexauto gets you to a **booting, guest-code-executing build, automatically**. It does **not**
-close per-title GPU/emulation gaps: a game using vertex formats or kernel calls the ReXGlue
-runtime doesn't implement yet will boot, open a window, and reach the render loop but may not
-draw correctly or stay up. That's runtime-emulation work — separate from recompilation, and
-inherently per title. rexauto removes the mechanical pipeline; the runtime backend is still
-where a given title lives or dies.
+## Audio
 
-You supply the game. rexauto does not download, decrypt or distribute copyrighted content.
+Audio functionality also depends on the original Xbox 360 environment.
 
-## Build from source
+The native implementation may provide replacements for systems responsible for:
 
-```sh
-pip install pywebview pyinstaller pillow
-python gui/make_icon.py
-pyinstaller --noconfirm --onefile --windowed --name rexauto \
-  --icon gui/rexauto.ico --add-data "gui/index.html;gui" \
-  --add-data "vendor/xenon-jumptables;xenon-jumptables" \
-  --add-data "thirdparty/libmspack;thirdparty/libmspack" --add-data "tools;tools" \
-  --paths gui \
-  --hidden-import extract --hidden-import heal --hidden-import closure \
-  --hidden-import codegen_patches --hidden-import jt_landings \
-  --hidden-import rexauto --hidden-import xctd \
-  --hidden-import detect_setjmp --hidden-import server --hidden-import setup \
-  --collect-all webview app.py
-```
+- Sound playback
+- Music
+- Audio buffers
+- Streaming
+- Volume control
+- Channels
+- Audio synchronization
 
-One binary, two modes: no args → the GUI; `--__pipeline …` → the recompiler (the GUI
-re-invokes itself to stream the pipeline). Or run it as a plain web app: `python gui/server.py`.
+## Input
 
-## Related projects
+Minecraft: Xbox 360 Edition was designed around the Xbox 360 controller.
 
-- **[xenon-jumptables](https://github.com/xdzleo/xenon-jumptables)** — recovers PowerPC
-  `bctr` jump tables that static recompilers miss. Used by the jumptables stage.
-- **[rexglue-sdk](https://github.com/xdzleo/rexglue-sdk)** — the Xbox 360 recompilation
-  runtime and toolkit.
+LegacyRecomp can provide an input abstraction capable of translating modern input devices into the input behavior expected by the game.
 
-## Credits
+Potential input devices include:
 
-- **ReXGlue** — the static recompiler + runtime rexauto drives (© Tom Clay, BSD-3; derived
-  from [Xenia](https://github.com/xenia-project/xenia)). Releases bundle a prebuilt copy of
-  the [skate3 fork](https://github.com/xdzleo/rexglue-skate3) for one-click setup — see
-  [NOTICE](NOTICE).
-- **[xenon-jumptables](https://github.com/xdzleo/xenon-jumptables)** — the jump-table /
-  boundary recovery behind the jumptables stage.
+- Xbox controllers
+- Other gamepads
+- Keyboard
+- Mouse
+- Platform-specific controllers
+
+## File System
+
+The original game expects its resources and persistent data to be accessible through the Xbox 360 environment.
+
+A native implementation therefore requires a compatible file-system layer.
+
+This may include handling for:
+
+- Game resources
+- Configuration files
+- Save data
+- World data
+- Player data
+- Cached files
+- Other persistent information
+
+Original copyrighted game data is not included in this repository.
+
+## Save Data
+
+Minecraft contains persistent player and world information.
+
+A native implementation may need to support:
+
+- World saves
+- Player data
+- Game settings
+- Configuration
+- Preferences
+- Other persistent data
+
+Where practical, preserving compatibility with existing formats can help maintain the original game's behavior.
+
+## Networking
+
+Minecraft: Xbox 360 Edition contains networking functionality designed for the Xbox 360 environment.
+
+Networking systems may require additional compatibility work when running outside of the original console.
+
+The implementation of networking functionality depends on the requirements of the original executable and the target platform.
+
+## Reverse Engineering
+
+LegacyRecomp involves analysis of compiled software and reconstruction of its behavior.
+
+Research may include:
+
+- PowerPC instruction analysis
+- Function identification
+- Control-flow analysis
+- Data structure reconstruction
+- Address mapping
+- Memory analysis
+- Runtime analysis
+- Xbox 360 system research
+- Platform interface analysis
+- Native code generation
+
+The project is intended to provide a technical exploration of how a large Xbox 360 application can be transformed into a native program.
+
+## Development
+
+Development can involve several areas of software engineering and reverse engineering, including:
+
+- C/C++
+- PowerPC
+- Binary analysis
+- Static recompilation
+- Systems programming
+- Graphics programming
+- Audio programming
+- Input systems
+- File systems
+- Networking
+- Platform abstraction
+- Debugging
+- Performance optimization
+
+## Original Game Files
+
+LegacyRecomp does not distribute the original Minecraft: Xbox 360 Edition executable, game assets, or other copyrighted game data.
+
+Required original game files must be obtained separately.
+
+Do not commit original copyrighted game data to this repository.
+
+## Contributing
+
+Contributions are welcome.
+
+Useful contributions include:
+
+- Reverse-engineering research
+- Code improvements
+- Platform implementations
+- Documentation
+- Testing
+- Bug fixes
+- Build-system improvements
+- Compatibility research
+- Performance improvements
+- Technical investigations
+
+Please do not submit copyrighted game data or proprietary assets in pull requests.
+
+## Legal Notice
+
+Minecraft and Minecraft: Xbox 360 Edition are copyrighted works and trademarks of their respective owners.
+
+LegacyRecomp is an independent fan-made project and is not affiliated with, sponsored by, or endorsed by Mojang Studios or Microsoft.
+
+This repository does not distribute the original game's executable, assets, or other copyrighted game data.
+
+Users are responsible for obtaining and using any required game files in accordance with applicable laws.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Bundled third-party components keep their own licenses
-([NOTICE](NOTICE)).
+The source code contained in this repository is provided under the license specified by the project.
+
+Third-party components may have their own licenses. Refer to the relevant files and directories for additional licensing information.
 
 ---
 
-<sub>Keywords: Xbox 360 to PC · static recompilation · PowerPC / Xenon decompilation · XEX ·
-native port · game porting · reverse engineering · XenonRecomp</sub>
+**LegacyRecomp**
+
+*Recompiling Minecraft: Xbox 360 Edition for modern platforms.*
