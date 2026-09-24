@@ -25,12 +25,12 @@ rexglue_setup_target(legacyrecomp)
 
 # rexauto-pch: parse the LegacyRecomp_init.h monolith once, not once per TU
 # (build perf; output-neutral -- a PCH caches the AST, not emitted code).
-target_precompile_headers(LegacyRecomp PRIVATE
+target_precompile_headers(legacyrecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/LegacyRecomp_init.h")
 
 # rexauto-debug-diet: keep function symbols + line tables, drop the
 # variable/type debug info that bloats the PDB and slows every relink
 # (build perf; debug-info-only -- .text and codegen stay byte-identical).
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_compile_options(LegacyRecomp PRIVATE $<$<CONFIG:RelWithDebInfo>:-gline-tables-only>)
+    target_compile_options(legacyrecomp PRIVATE $<$<CONFIG:RelWithDebInfo>:-gline-tables-only>)
 endif()
