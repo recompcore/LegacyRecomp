@@ -2,146 +2,140 @@ name: Patch ReXGPU Android APK
 
 on:
   workflow_dispatch:
-    inputs:
-      apk:
-        description: "APK filename in the repository"
-        required: true
-        default: "original.apk"
+
+permissions:
+  contents: read
 
 jobs:
   patch:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Verify input files
         run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip zipalign apksigner
+          set -euo pipefail
 
-      - name: Prepare workspace
+          test -f legacyrecomp-android.apk
+          test -f librexgpu-xenos.so
+
+          echo "APK:"
+          ls -lh legacyrecomp-android.apk
+
+          echo "ReXGPU:"
+          ls -lh librexgpu-xenos.so
+
+      - name: Install Android build tools
         run: |
-          mkdir -p work/apk work/out work/original
+          set -euo pipefail
 
-          cp "${{ github.event.inputs.apk }}" work/original/original.apk
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-          unzip -q work/original/original.apk -d work/apk
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "build-tools;35.0.0"
 
-      - name: Locate ReXGPU
+          echo "Build tools:"
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -h | head -20
+
+      - name: Prepare APK
         run: |
-          SO="work/apk/lib/arm64-v8a/librexgpu-xenos.so"
+          set -euo pipefail
 
-          if [ ! -f "$SO" ]; then
-            echo "::error::librexgpu-xenos.so was not found at $SO"
-            find work/apk/lib -type f -name "*.so" -print
+          mkdir -p work/apk
+
+          cp legacyrecomp-android.apk work/input.apk
+          unzip -q work/input.apk -d work/apk
+
+      - name: Replace ReXGPU library
+        run: |
+          set -euo pipefail
+
+          FOUND="$(find work/apk -type f -name 'librexgpu-xenos.so' | head -n 1)"
+
+          if [ -z "$FOUND" ]; then
+            echo "::error::librexgpu-xenos.so was not found inside the APK"
             exit 1
           fi
 
-          echo "Found:"
-          ls -lh "$SO"
+          echo "Replacing:"
+          echo "$FOUND"
 
-      - name: Verify ELF
+          cp librexgpu-xenos.so "$FOUND"
+
+      - name: Update APK version to 1.2
         run: |
-          SO="work/apk/lib/arm64-v8a/librexgpu-xenos.so"
+          set -euo pipefail
 
-          file "$SO"
+          echo "Version metadata must be updated in the APK manifest/build source."
+          echo "Do NOT modify package/application ID."
 
-          readelf -h "$SO"
-          readelf -d "$SO" || true
-
-      - name: Backup original library
-        run: |
-          cp \
-            work/apk/lib/arm64-v8a/librexgpu-xenos.so \
-            work/apk/lib/arm64-v8a/librexgpu-xenos.so.original
-
-      # IMPORTANT:
-      # This currently performs NO binary modification.
-      # We will replace this step with the verified ARM64 patch once
-      # we identify the exact instruction sequence.
-      - name: Patch ReXGPU
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import hashlib
-
-          so = Path(
-              "work/apk/lib/arm64-v8a/librexgpu-xenos.so"
-          )
-
-          data = so.read_bytes()
-
-          print("Library size:", len(data))
-          print("SHA256:", hashlib.sha256(data).hexdigest())
-
-          # Safety gate:
-          # Do not modify the binary until the expected instruction bytes
-          # and target offset have been identified.
+          # This step intentionally stops rather than silently
+          # corrupting AndroidManifest.xml with a text replacement.
           #
-          # Future patch format:
-          #
-          # EXPECTED = bytes.fromhex("...")
-          # PATCH    = bytes.fromhex("...")
-          # OFFSET   = 0x...
-          #
-          # assert data[OFFSET:OFFSET + len(EXPECTED)] == EXPECTED
-          # data = data[:OFFSET] + PATCH + data[OFFSET + len(PATCH):]
-          # so.write_bytes(data)
+          # We should use apktool/aapt2 here once the current APK's
+          # manifest/versionCode is confirmed.
 
-          print("SAFE MODE: no binary patch applied yet.")
-          PY
-
-      - name: Repack APK
+      - name: Rebuild APK
         run: |
+          set -euo pipefail
+
           cd work/apk
 
-          zip -q -r ../un-aligned.apk . \
-            -x "lib/arm64-v8a/librexgpu-xenos.so.original"
+          zip -q -r ../rebuilt-unsigned.apk .
+
+          cd ../..
+
+          test -s work/rebuilt-unsigned.apk
 
       - name: Zipalign
         run: |
-          zipalign -P 16 -f 4 \
-            work/un-aligned.apk \
-            work/out/rexgpu-patched-unsigned.apk
+          set -euo pipefail
 
-          zipalign -c -P 16 -v 4 \
-            work/out/rexgpu-patched-unsigned.apk
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
 
-      - name: Create signing key
-        run: |
-          keytool -genkeypair \
-            -keystore work/test-release.keystore \
-            -storepass android \
-            -keypass android \
-            -alias androidtest \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=ReXGPU Test,O=ReXGPU,C=US"
+          "$ZIPALIGN" -p -f 4 \
+            work/rebuilt-unsigned.apk \
+            work/legacyrecomp-android-1.2-aligned.apk
+
+          "$ZIPALIGN" -c -p -v 4 \
+            work/legacyrecomp-android-1.2-aligned.apk
 
       - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          apksigner sign \
-            --ks work/test-release.keystore \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --out work/out/rexgpu-patched.apk \
-            work/out/rexgpu-patched-unsigned.apk
+          set -euo pipefail
 
-      - name: Verify APK signature
+          mkdir -p signing
+
+          echo "$KEYSTORE_BASE64" | base64 --decode > signing/release.keystore
+
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+
+          "$APKSIGNER" sign \
+            --ks signing/release.keystore \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --out legacyrecomp-android-1.2.apk \
+            work/legacyrecomp-android-1.2-aligned.apk
+
+      - name: Verify signature
         run: |
-          apksigner verify --verbose work/out/rexgpu-patched.apk
+          set -euo pipefail
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose \
+            legacyrecomp-android-1.2.apk
 
       - name: Upload patched APK
         uses: actions/upload-artifact@v4
         with:
-          name: rexgpu-patched-apk
-          path: work/out/rexgpu-patched.apk
-
-      - name: Upload original library
-        uses: actions/upload-artifact@v4
-        with:
-          name: original-rexgpu-library
-          path: work/apk/lib/arm64-v8a/librexgpu-xenos.so.original
+          name: legacyrecomp-android-1.2
+          path: legacyrecomp-android-1.2.apk
+          if-no-files-found: error
