@@ -1,0 +1,147 @@
+name: Patch ReXGPU Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk:
+        description: "APK filename in the repository"
+        required: true
+        default: "original.apk"
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip zipalign apksigner
+
+      - name: Prepare workspace
+        run: |
+          mkdir -p work/apk work/out work/original
+
+          cp "${{ github.event.inputs.apk }}" work/original/original.apk
+
+          unzip -q work/original/original.apk -d work/apk
+
+      - name: Locate ReXGPU
+        run: |
+          SO="work/apk/lib/arm64-v8a/librexgpu-xenos.so"
+
+          if [ ! -f "$SO" ]; then
+            echo "::error::librexgpu-xenos.so was not found at $SO"
+            find work/apk/lib -type f -name "*.so" -print
+            exit 1
+          fi
+
+          echo "Found:"
+          ls -lh "$SO"
+
+      - name: Verify ELF
+        run: |
+          SO="work/apk/lib/arm64-v8a/librexgpu-xenos.so"
+
+          file "$SO"
+
+          readelf -h "$SO"
+          readelf -d "$SO" || true
+
+      - name: Backup original library
+        run: |
+          cp \
+            work/apk/lib/arm64-v8a/librexgpu-xenos.so \
+            work/apk/lib/arm64-v8a/librexgpu-xenos.so.original
+
+      # IMPORTANT:
+      # This currently performs NO binary modification.
+      # We will replace this step with the verified ARM64 patch once
+      # we identify the exact instruction sequence.
+      - name: Patch ReXGPU
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          so = Path(
+              "work/apk/lib/arm64-v8a/librexgpu-xenos.so"
+          )
+
+          data = so.read_bytes()
+
+          print("Library size:", len(data))
+          print("SHA256:", hashlib.sha256(data).hexdigest())
+
+          # Safety gate:
+          # Do not modify the binary until the expected instruction bytes
+          # and target offset have been identified.
+          #
+          # Future patch format:
+          #
+          # EXPECTED = bytes.fromhex("...")
+          # PATCH    = bytes.fromhex("...")
+          # OFFSET   = 0x...
+          #
+          # assert data[OFFSET:OFFSET + len(EXPECTED)] == EXPECTED
+          # data = data[:OFFSET] + PATCH + data[OFFSET + len(PATCH):]
+          # so.write_bytes(data)
+
+          print("SAFE MODE: no binary patch applied yet.")
+          PY
+
+      - name: Repack APK
+        run: |
+          cd work/apk
+
+          zip -q -r ../un-aligned.apk . \
+            -x "lib/arm64-v8a/librexgpu-xenos.so.original"
+
+      - name: Zipalign
+        run: |
+          zipalign -P 16 -f 4 \
+            work/un-aligned.apk \
+            work/out/rexgpu-patched-unsigned.apk
+
+          zipalign -c -P 16 -v 4 \
+            work/out/rexgpu-patched-unsigned.apk
+
+      - name: Create signing key
+        run: |
+          keytool -genkeypair \
+            -keystore work/test-release.keystore \
+            -storepass android \
+            -keypass android \
+            -alias androidtest \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=ReXGPU Test,O=ReXGPU,C=US"
+
+      - name: Sign APK
+        run: |
+          apksigner sign \
+            --ks work/test-release.keystore \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out work/out/rexgpu-patched.apk \
+            work/out/rexgpu-patched-unsigned.apk
+
+      - name: Verify APK signature
+        run: |
+          apksigner verify --verbose work/out/rexgpu-patched.apk
+
+      - name: Upload patched APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rexgpu-patched-apk
+          path: work/out/rexgpu-patched.apk
+
+      - name: Upload original library
+        uses: actions/upload-artifact@v4
+        with:
+          name: original-rexgpu-library
+          path: work/apk/lib/arm64-v8a/librexgpu-xenos.so.original
