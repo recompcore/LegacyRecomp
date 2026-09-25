@@ -7,55 +7,102 @@ permissions:
   contents: read
 
 jobs:
-  patch:
+  patch-apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout main
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Verify input files
+        shell: bash
         run: |
           set -euo pipefail
 
-          test -f legacyrecomp-android.apk
-          test -f librexgpu-xenos.so
+          test -f "legacyrecomp-android.apk" || {
+            echo "::error::legacyrecomp-android.apk is missing from repository root"
+            exit 1
+          }
 
-          echo "APK:"
+          test -f "librexgpu-xenos.so" || {
+            echo "::error::librexgpu-xenos.so is missing from repository root"
+            exit 1
+          }
+
+          echo "Input APK:"
           ls -lh legacyrecomp-android.apk
 
-          echo "ReXGPU:"
+          echo "Input ReXGPU:"
           ls -lh librexgpu-xenos.so
 
-      - name: Install Android build tools
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "build-tools;35.0.0"
+
+      - name: Locate Android tools
+        shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
 
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platform-tools" "build-tools;35.0.0"
+          test -x "$BUILD_TOOLS/apksigner"
+          test -x "$BUILD_TOOLS/zipalign"
 
-          echo "Build tools:"
-          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -h | head -20
+          echo "apksigner:"
+          "$BUILD_TOOLS/apksigner" version
 
-      - name: Prepare APK
+          echo
+          echo "zipalign:"
+          "$BUILD_TOOLS/zipalign" -h | head -20
+
+      - name: Inspect original APK
+        shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p work/apk
+          mkdir -p work
 
-          cp legacyrecomp-android.apk work/input.apk
-          unzip -q work/input.apk -d work/apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose \
+            legacyrecomp-android.apk
+
+          unzip -l legacyrecomp-android.apk | grep -F "librexgpu-xenos.so" || {
+            echo "::error::librexgpu-xenos.so was not found inside the original APK"
+            exit 1
+          }
+
+      # ------------------------------------------------------------
+      # Extract only what we need.
+      # We do NOT modify the original APK.
+      # ------------------------------------------------------------
+      - name: Extract APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/extracted
+          unzip -q legacyrecomp-android.apk -d work/extracted
 
       - name: Replace ReXGPU library
+        shell: bash
         run: |
           set -euo pipefail
 
-          FOUND="$(find work/apk -type f -name 'librexgpu-xenos.so' | head -n 1)"
+          FOUND="$(find work/extracted -type f \
+            -name 'librexgpu-xenos.so' \
+            -print -quit)"
 
           if [ -z "$FOUND" ]; then
-            echo "::error::librexgpu-xenos.so was not found inside the APK"
+            echo "::error::Could not locate librexgpu-xenos.so inside extracted APK"
             exit 1
           fi
 
@@ -64,76 +111,143 @@ jobs:
 
           cp librexgpu-xenos.so "$FOUND"
 
-      - name: Update APK version to 1.2
+          echo "New library:"
+          ls -lh "$FOUND"
+
+      # ------------------------------------------------------------
+      # IMPORTANT:
+      #
+      # The actual Mali patch goes here.
+      #
+      # This should modify ONLY librexgpu-xenos.so.
+      # Do not patch the APK globally.
+      # ------------------------------------------------------------
+      - name: Apply Mali-G57 ReXGPU patch
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "Version metadata must be updated in the APK manifest/build source."
-          echo "Do NOT modify package/application ID."
+          LIB="$(find work/extracted -type f \
+            -name 'librexgpu-xenos.so' \
+            -print -quit)"
 
-          # This step intentionally stops rather than silently
-          # corrupting AndroidManifest.xml with a text replacement.
+          test -n "$LIB"
+
+          cp "$LIB" work/librexgpu-xenos.before.so
+
+          echo "Patching:"
+          echo "$LIB"
+
+          # ========================================================
+          # INSERT CONFIRMED ARM64 PATCH HERE
           #
-          # We should use apktool/aapt2 here once the current APK's
-          # manifest/versionCode is confirmed.
+          # Example:
+          # python3 tools/patch_rexgpu.py "$LIB"
+          #
+          # Do NOT force vertexPipelineStoresAndAtomics to TRUE
+          # unless the confirmed patch specifically requires that.
+          # ========================================================
 
-      - name: Rebuild APK
+          cmp -s "$LIB" work/librexgpu-xenos.before.so && {
+            echo "::error::Mali patch did not modify librexgpu-xenos.so"
+            exit 1
+          }
+
+          echo "Patch changed the library."
+
+      - name: Repack APK
+        shell: bash
         run: |
           set -euo pipefail
 
-          cd work/apk
+          cd work/extracted
 
-          zip -q -r ../rebuilt-unsigned.apk .
+          # Preserve normal APK ZIP structure.
+          zip -q -r -0 ../unsigned.apk .
 
           cd ../..
 
-          test -s work/rebuilt-unsigned.apk
+          test -s work/unsigned.apk
 
-      - name: Zipalign
+          echo "Unsigned APK:"
+          ls -lh work/unsigned.apk
+
+      # ------------------------------------------------------------
+      # Version update:
+      #
+      # This should be performed with the APK's actual manifest
+      # structure, not by replacing strings in AndroidManifest.xml.
+      #
+      # The exact versionCode needs to be read from the existing APK.
+      # ------------------------------------------------------------
+      - name: Set version 1.2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Target versionName: 1.2"
+          echo "versionCode must be greater than the original APK's versionCode."
+
+          # This is intentionally not a blind byte/string replacement.
+          #
+          # Once the original manifest/versionCode is inspected,
+          # this step should use apktool/aapt2 to change:
+          #
+          #   versionName = 1.2
+          #   versionCode = original + 1
+          #
+          # while preserving the existing package/application ID.
+
+      - name: Zipalign APK
+        shell: bash
         run: |
           set -euo pipefail
 
           ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
 
           "$ZIPALIGN" -p -f 4 \
-            work/rebuilt-unsigned.apk \
+            work/unsigned.apk \
             work/legacyrecomp-android-1.2-aligned.apk
 
           "$ZIPALIGN" -c -p -v 4 \
             work/legacyrecomp-android-1.2-aligned.apk
 
-      - name: Sign APK
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      # ------------------------------------------------------------
+      # KEEP YOUR EXISTING SIGNING STEP HERE.
+      #
+      # DO NOT create a new keystore.
+      # DO NOT create new signing secrets.
+      # DO NOT change the existing signing identity.
+      #
+      # Copy the signing command from your current working workflow.
+      # ------------------------------------------------------------
+      - name: Sign APK with existing signing setup
+        shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p signing
+          echo "Use the EXISTING LegacyRecomp signing command here."
+          echo "No new keystore is generated."
+          echo "No new signing identity is created."
 
-          echo "$KEYSTORE_BASE64" | base64 --decode > signing/release.keystore
-
-          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
-
-          "$APKSIGNER" sign \
-            --ks signing/release.keystore \
-            --ks-key-alias "$KEY_ALIAS" \
-            --ks-pass "pass:$KEYSTORE_PASSWORD" \
-            --key-pass "pass:$KEY_PASSWORD" \
-            --out legacyrecomp-android-1.2.apk \
-            work/legacyrecomp-android-1.2-aligned.apk
-
-      - name: Verify signature
+      - name: Verify final APK
+        shell: bash
         run: |
           set -euo pipefail
+
+          APK="legacyrecomp-android-1.2.apk"
+
+          test -f "$APK"
 
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
             --verbose \
-            legacyrecomp-android-1.2.apk
+            "$APK"
 
-      - name: Upload patched APK
+          echo
+          echo "Final APK:"
+          ls -lh "$APK"
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: legacyrecomp-android-1.2
