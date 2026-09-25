@@ -1,0 +1,67 @@
+name: Find Vulkan Feature Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  find-vulkan:
+    name: Locate Vulkan feature check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout LegacyRecomp
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git patch
+
+      - name: Download and patch ReXGlue SDK
+        run: |
+          set -euo pipefail
+          tools/android_sdk.sh
+
+      - name: Find vertexPipelineStoresAndAtomics
+        run: |
+          echo "=============================================="
+          echo "Searching ReXGlue SDK for:"
+          echo "vertexPipelineStoresAndAtomics"
+          echo "=============================================="
+
+          grep -Rni \
+            "vertexPipelineStoresAndAtomics" \
+            android/sdk/rexglue-sdk \
+            2>/dev/null || true
+
+      - name: Find Vulkan device creation
+        run: |
+          echo "=============================================="
+          echo "Searching for Vulkan device creation"
+          echo "=============================================="
+
+          grep -RniE \
+            "vkCreateDevice|vkGetPhysicalDeviceFeatures|physical.*device|CreateDevice" \
+            android/sdk/rexglue-sdk/src \
+            2>/dev/null | head -300 || true
+
+      - name: Find Vulkan source files
+        run: |
+          echo "=============================================="
+          echo "Vulkan source files"
+          echo "=============================================="
+
+          find android/sdk/rexglue-sdk \
+            -type f \
+            \( -iname "*vulkan*" -o -iname "*gpu*" \) \
+            -print | sort
