@@ -1,4 +1,4 @@
-name: Patch LegacyRecomp for Mali-G57
+name: Mali G57 - Patch LegacyRecomp APK
 
 on:
   workflow_dispatch:
@@ -21,44 +21,30 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check inputs
-        shell: bash
         run: |
           set -euo pipefail
 
-          test -f "$APK" || {
-            echo "::error::$APK is missing from repository root"
-            exit 1
-          }
-
-          test -f "$REXGPU" || {
-            echo "::error::$REXGPU is missing from repository root"
-            exit 1
-          }
+          test -f "$APK"
+          test -f "$REXGPU"
 
           echo "APK:"
           ls -lh "$APK"
 
-          echo
           echo "ReXGPU:"
           ls -lh "$REXGPU"
 
-          echo
-          echo "ReXGPU SHA256:"
-          sha256sum "$REXGPU"
-
-      - name: Set up Java
+      - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: "build-tools;35.0.0"
 
-      - name: Define Android tools
-        shell: bash
+      - name: Set Android tools
         run: |
           set -euo pipefail
 
@@ -71,155 +57,236 @@ jobs:
 
           "$BT/apksigner" version
 
-      - name: Inspect original APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "APK contents:"
-          unzip -l "$APK" | grep -F "$REXGPU"
-
-          echo
-          echo "Original APK certificate:"
-          "$BT/apksigner" verify --print-certs "$APK"
-
-      - name: Extract APK
-        shell: bash
+      # ------------------------------------------------------------
+      # Keep a copy of the original APK and library.
+      # ------------------------------------------------------------
+      - name: Prepare workspace
         run: |
           set -euo pipefail
 
           rm -rf work
           mkdir -p work/apk
 
-          unzip -q "$APK" -d work/apk
+          cp "$APK" work/original.apk
+          cp "$REXGPU" work/rexgpu-original.so
 
-          FOUND="$(find work/apk \
+          unzip -q work/original.apk -d work/apk
+
+      # ------------------------------------------------------------
+      # Find the actual library inside the APK.
+      # ------------------------------------------------------------
+      - name: Locate ReXGPU
+        run: |
+          set -euo pipefail
+
+          LIB="$(find work/apk \
             -type f \
             -name "$REXGPU" \
             -print -quit)"
 
-          test -n "$FOUND" || {
-            echo "::error::$REXGPU is not present inside APK"
-            exit 1
-          }
+          test -n "$LIB"
 
-          echo "REXGPU_IN_APK=$FOUND" >> "$GITHUB_ENV"
+          echo "LIB=$LIB" >> "$GITHUB_ENV"
 
-          echo "Found library:"
-          echo "$FOUND"
+          echo "Found:"
+          echo "$LIB"
 
-      # ----------------------------------------------------------
-      # ACTUAL RECGPU PATCH
+      # ------------------------------------------------------------
+      # Analyze the actual library.
+      #
+      # We don't assume a fixed offset because an ELF binary can
+      # change between builds.
+      # ------------------------------------------------------------
+      - name: Analyze ReXGPU
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y binutils
+
+          echo "ELF:"
+          file "$LIB"
+
+          echo
+          echo "Architecture:"
+          readelf -h "$LIB" | grep -E 'Class|Machine'
+
+          echo
+          echo "Vulkan references:"
+          strings -a -t x "$LIB" | \
+            grep -i \
+              -E 'vertexPipelineStoresAndAtomics|vkGetPhysicalDeviceFeatures|vkCreateDevice' \
+              || true
+
+      # ------------------------------------------------------------
+      # PATCH
       #
       # IMPORTANT:
-      # This operates on the .so itself.
+      # The patch is applied ONLY when the expected byte pattern is
+      # found. This prevents silently corrupting a different build.
       #
-      # Once the confirmed offset + replacement bytes are known,
-      # put the direct binary patch command here.
-      #
-      # Nothing else in the APK is modified by this step.
-      # ----------------------------------------------------------
-      - name: Patch librexgpu-xenos.so
-        shell: bash
+      # Replace OLD_BYTES and NEW_BYTES with the bytes from the
+      # confirmed feature-check instruction.
+      # ------------------------------------------------------------
+      - name: Patch Mali Vulkan feature check
+        env:
+          OLD_BYTES: ""
+          NEW_BYTES: ""
+          PATCH_OFFSET: ""
         run: |
           set -euo pipefail
 
-          cp "$REXGPU" work/librexgpu-xenos-patched.so
+          if [ -z "$PATCH_OFFSET" ] || \
+             [ -z "$OLD_BYTES" ] || \
+             [ -z "$NEW_BYTES" ]; then
+            echo "::error::The confirmed ARM64 patch bytes/offset have not been supplied."
+            echo
+            echo "The workflow successfully located the real ReXGPU library."
+            echo "It will NOT guess an instruction and corrupt the binary."
+            exit 1
+          fi
 
-          echo "Patch target:"
-          echo "work/librexgpu-xenos-patched.so"
+          python3 - "$LIB" "$PATCH_OFFSET" "$OLD_BYTES" "$NEW_BYTES" <<'PY'
+          import sys
+          from pathlib import Path
 
-          # --------------------------------------------------------
-          # INSERT THE CONFIRMED BINARY PATCH HERE.
-          #
-          # Example shape only:
-          #
-          # python3 - <<'PY'
-          # from pathlib import Path
-          #
-          # p = Path("work/librexgpu-xenos-patched.so")
-          # b = bytearray(p.read_bytes())
-          #
-          # offset = ...
-          # old = bytes.fromhex("...")
-          # new = bytes.fromhex("...")
-          #
-          # assert b[offset:offset + len(old)] == old
-          # b[offset:offset + len(new)] = new
-          # p.write_bytes(b)
-          # PY
-          #
-          # DO NOT PUT A GUESSED PATCH HERE.
-          # --------------------------------------------------------
+          path = Path(sys.argv[1])
+          offset = int(sys.argv[2], 0)
+          old = bytes.fromhex(sys.argv[3])
+          new = bytes.fromhex(sys.argv[4])
 
-          echo "Patch step reached."
+          data = bytearray(path.read_bytes())
 
+          if data[offset:offset + len(old)] != old:
+              got = data[offset:offset + len(old)].hex(" ")
+              raise SystemExit(
+                  f"Expected bytes {old.hex(' ')} at "
+                  f"{offset:#x}, found {got}"
+              )
+
+          data[offset:offset + len(old)] = new
+          path.write_bytes(data)
+
+          print(f"Patched {path} at {offset:#x}")
+          print(f"OLD: {old.hex(' ')}")
+          print(f"NEW: {new.hex(' ')}")
+          PY
+
+      # ------------------------------------------------------------
+      # Replace only the library.
+      # ------------------------------------------------------------
       - name: Install patched ReXGPU
-        shell: bash
         run: |
           set -euo pipefail
 
-          cp \
-            work/librexgpu-xenos-patched.so \
-            "$REXGPU_IN_APK"
+          cp "$LIB" work/patched-rexgpu.so
 
-          echo "Installed patched library:"
-          ls -lh "$REXGPU_IN_APK"
-
+      # ------------------------------------------------------------
+      # Rebuild APK.
+      #
+      # The original APK structure is retained.
+      # ------------------------------------------------------------
       - name: Repack APK
-        shell: bash
         run: |
           set -euo pipefail
 
           cd work/apk
 
-          # Preserve APK entries as stored ZIP entries.
-          zip -q -r -0 ../unsigned.apk .
+          zip -q -r -0 ../patched-unsigned.apk .
 
           cd ../..
 
-          test -s work/unsigned.apk
+          test -s work/patched-unsigned.apk
 
-          echo "Unsigned APK:"
-          ls -lh work/unsigned.apk
-
-      # ----------------------------------------------------------
+      # ------------------------------------------------------------
       # VERSION
       #
-      # We do this BEFORE zipalign/signing.
-      #
-      # The package name must remain unchanged.
-      # versionName becomes 1.2.
-      # versionCode must increase over 1.1.
-      #
-      # This needs to use the APK's actual manifest rather than
-      # blindly replacing text in AndroidManifest.xml.
-      # ----------------------------------------------------------
-      - name: Update app version
-        shell: bash
+      # This uses apktool rather than trying to edit the compiled
+      # AndroidManifest.xml with sed.
+      # ------------------------------------------------------------
+      - name: Install apktool
         run: |
           set -euo pipefail
 
-          echo "Target version: 1.2"
+          curl -fsSL \
+            -o apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/latest/download/apktool.jar
 
-          # IMPORTANT:
-          # Wire the actual manifest/versionCode operation here.
-          #
-          # Do not use sed on the binary AndroidManifest.xml.
-          #
-          # Expected result:
-          #   versionName = 1.2
-          #   versionCode = original versionCode + 1
-          #
-          # The package/application ID must remain identical.
+          test -s apktool.jar
 
-          exit 1
+      - name: Decode APK for version update
+        run: |
+          set -euo pipefail
 
-      # ----------------------------------------------------------
-      # 16 KB PAGE ALIGNMENT
-      # ----------------------------------------------------------
-      - name: Zipalign
-        shell: bash
+          java -jar apktool.jar d \
+            -f \
+            work/patched-unsigned.apk \
+            -o work/apktool
+
+      - name: Update version
+        run: |
+          set -euo pipefail
+
+          MANIFEST="work/apktool/AndroidManifest.xml"
+
+          test -f "$MANIFEST"
+
+          echo "Current manifest:"
+          grep -E \
+            'version(Name|Code)|package=' \
+            "$MANIFEST" || true
+
+          python3 - "$MANIFEST" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+
+          # versionName: 1.2
+          if 'android:versionName=' not in s:
+              raise SystemExit("versionName not found")
+
+          s = re.sub(
+              r'android:versionName="[^"]*"',
+              'android:versionName="1.2"',
+              s,
+              count=1
+          )
+
+          # Increment versionCode by one.
+          m = re.search(r'android:versionCode="([0-9]+)"', s)
+
+          if not m:
+              raise SystemExit("versionCode not found")
+
+          old_code = int(m.group(1))
+          new_code = old_code + 1
+
+          s = s[:m.start(1)] + str(new_code) + s[m.end(1):]
+
+          p.write_text(s)
+
+          print(f"versionName: 1.2")
+          print(f"versionCode: {old_code} -> {new_code}")
+          PY
+
+      - name: Rebuild versioned APK
+        run: |
+          set -euo pipefail
+
+          java -jar apktool.jar b \
+            work/apktool \
+            -o work/versioned-unsigned.apk
+
+          test -s work/versioned-unsigned.apk
+
+      # ------------------------------------------------------------
+      # 16 KB ZIP alignment.
+      # Android documents this exact verification method.
+      # ------------------------------------------------------------
+      - name: Zipalign 16 KB
         run: |
           set -euo pipefail
 
@@ -231,7 +298,6 @@ jobs:
             work/legacyrecomp-android-1.2-aligned.apk
 
       - name: Verify 16 KB alignment
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -242,26 +308,28 @@ jobs:
             4 \
             work/legacyrecomp-android-1.2-aligned.apk
 
-      # ----------------------------------------------------------
-      # EXISTING SIGNING
+      # ------------------------------------------------------------
+      # SIGNING
       #
-      # KEEP YOUR CURRENT LegacyRecomp SIGNING COMMAND HERE.
-      #
-      # No new keystore.
-      # No new secret.
-      # No new certificate.
-      # ----------------------------------------------------------
-      - name: Sign with existing LegacyRecomp signing
-        shell: bash
+      # THIS MUST USE THE EXISTING SIGNING MECHANISM FROM YOUR
+      # REPOSITORY. Nothing here creates a new keystore.
+      # ------------------------------------------------------------
+      - name: Sign APK
         run: |
           set -euo pipefail
 
-          echo "Use the existing signing command from the repository here."
+          # Copy the signing command already used by the project here.
+          #
+          # The input MUST be:
+          # work/legacyrecomp-android-1.2-aligned.apk
+          #
+          # The output MUST be:
+          # legacyrecomp-android-1.2.apk
 
+          echo "::error::Existing project signing command must be retained here."
           exit 1
 
-      - name: Verify final APK
-        shell: bash
+      - name: Verify signed APK
         run: |
           set -euo pipefail
 
@@ -278,13 +346,9 @@ jobs:
             4 \
             legacyrecomp-android-1.2.apk
 
-          echo
-          echo "FINAL APK:"
-          ls -lh legacyrecomp-android-1.2.apk
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: legacyrecomp-android-1.2-mali-g57
+          name: LegacyRecomp-Mali-G57-v1.2
           path: legacyrecomp-android-1.2.apk
           if-no-files-found: error
