@@ -16,52 +16,50 @@ jobs:
       - name: Checkout LegacyRecomp
         uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git patch
-
       - name: Download and patch ReXGlue SDK
         run: |
           set -euo pipefail
           tools/android_sdk.sh
 
-      - name: Find vertexPipelineStoresAndAtomics
+      - name: Search ReXGlue Vulkan source
         run: |
-          echo "=============================================="
-          echo "Searching ReXGlue SDK for:"
-          echo "vertexPipelineStoresAndAtomics"
-          echo "=============================================="
+          set +e
 
+          REPORT="$GITHUB_WORKSPACE/vulkan-report.txt"
+
+          echo "==============================================" > "$REPORT"
+          echo "LegacyRecomp / ReXGlue Vulkan diagnostic" >> "$REPORT"
+          echo "==============================================" >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          echo "=== vertexPipelineStoresAndAtomics ===" >> "$REPORT"
           grep -Rni \
             "vertexPipelineStoresAndAtomics" \
             android/sdk/rexglue-sdk \
-            2>/dev/null || true
+            2>/dev/null >> "$REPORT"
 
-      - name: Find Vulkan device creation
-        run: |
-          echo "=============================================="
-          echo "Searching for Vulkan device creation"
-          echo "=============================================="
-
+          echo "" >> "$REPORT"
+          echo "=== Vulkan device creation ===" >> "$REPORT"
           grep -RniE \
             "vkCreateDevice|vkGetPhysicalDeviceFeatures|physical.*device|CreateDevice" \
             android/sdk/rexglue-sdk/src \
-            2>/dev/null | head -300 || true
+            2>/dev/null | head -300 >> "$REPORT"
 
-      - name: Find Vulkan source files
-        run: |
-          echo "=============================================="
-          echo "Vulkan source files"
-          echo "=============================================="
-
+          echo "" >> "$REPORT"
+          echo "=== Vulkan/GPU source files ===" >> "$REPORT"
           find android/sdk/rexglue-sdk \
             -type f \
             \( -iname "*vulkan*" -o -iname "*gpu*" \) \
-            -print | sort
+            -print | sort >> "$REPORT"
+
+          echo "" >> "$REPORT"
+          echo "=== Report complete ===" >> "$REPORT"
+
+          cat "$REPORT"
+
+      - name: Upload Vulkan report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulkan-report
+          path: vulkan-report.txt
+          retention-days: 7
